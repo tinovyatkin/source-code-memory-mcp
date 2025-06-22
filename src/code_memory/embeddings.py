@@ -1,17 +1,15 @@
 """Embedding generation for code snippets using sentence-transformers."""
 
 import asyncio
-import gc
 import logging
-import time
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 from typing import Any, List
 
 import numpy as np
 import torch
 from numpy.typing import NDArray
 from sentence_transformers import SentenceTransformer
+from transformers import AutoModel, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +66,8 @@ class CodeEmbedder:
         """
         self.model_name = model_name
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model: SentenceTransformer | None = None
-        self.max_seq_length: int = 8192
+        self.model = None
+        self.tokenizer = None
         self.executor = ThreadPoolExecutor(max_workers=1)
 
         logger.info(f"CodeEmbedder initialized with model: {model_name}, device: {self.device}")
