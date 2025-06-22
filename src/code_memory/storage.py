@@ -1,6 +1,7 @@
 """Vector storage implementation using SQLite with sqlite-vec extension."""
 
 import asyncio
+import json
 import logging
 import sqlite3
 from datetime import datetime
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import sqlite_vec
 from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
@@ -97,51 +99,44 @@ export DATABASE_PATH="/path/to/your/custom/location/code_memory.db"
 
         # Load sqlite-vec extension
         try:
-            self.connection.load_extension("sqlite-vec")
+            self.connection.enable_load_extension(True)
+            sqlite_vec.load(self.connection)
+            self.connection.enable_load_extension(False)
             logger.info("sqlite-vec extension loaded successfully")
         except sqlite3.OperationalError as e:
             logger.error(f"Failed to load sqlite-vec extension: {e}")
             raise RuntimeError("sqlite-vec extension not available") from e
 
-        # Configure SQLite optimizations
-        self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA cache_size=10000")
-        self.connection.execute("PRAGMA synchronous=NORMAL")
-        self.connection.execute("PRAGMA temp_store=MEMORY")
+        # Configure SQLite optimizations - match system design
+        self.connection.execute("PRAGMA journal_mode = WAL")
+        self.connection.execute("PRAGMA synchronous = NORMAL")
+        self.connection.execute("PRAGMA cache_size = -64000")  # 64MB cache
+        self.connection.execute("PRAGMA temp_store = MEMORY")
 
-        # Create main snippets table
+        # Create main snippets table - match system design schema
         self.connection.execute("""
             CREATE TABLE IF NOT EXISTS code_snippets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 code TEXT NOT NULL,
                 language TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                tags TEXT DEFAULT '',
+                description TEXT,
+                tags JSON,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                access_count INTEGER DEFAULT 0,
-                last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                access_count INTEGER DEFAULT 0
             )
         """)
 
-        # Create virtual table for embeddings
+        # Create vector table with 768 dimensions (Jina code embeddings) - match system design
         self.connection.execute(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS code_embeddings
-            USING vec0(
-                snippet_id INTEGER PRIMARY KEY,
-                embedding FLOAT[{self.embedding_dim}]
+            CREATE VIRTUAL TABLE IF NOT EXISTS code_embeddings USING vec0(
+                embedding float[{self.embedding_dim}]
             )
         """)
 
         # Create indices for performance
         self.connection.execute("""
             CREATE INDEX IF NOT EXISTS idx_language ON code_snippets(language)
-        """)
-        self.connection.execute("""
-            CREATE INDEX IF NOT EXISTS idx_created_at ON code_snippets(created_at)
-        """)
-        self.connection.execute("""
-            CREATE INDEX IF NOT EXISTS idx_tags ON code_snippets(tags)
         """)
 
         self.connection.commit()
@@ -169,14 +164,14 @@ export DATABASE_PATH="/path/to/your/custom/location/code_memory.db"
         if self.connection is None:
             raise RuntimeError("Storage not initialized")
 
-        tags_str = ",".join(tags or [])
+        tags_json = json.dumps(tags or [])
 
         # Insert in thread pool
         loop = asyncio.get_event_loop()
         snippet_id = await loop.run_in_executor(
             None,
             lambda: self._insert_snippet(
-                code, language, description, tags_str, embedding
+                code, language, description, tags_json, embedding
             ),
         )
 
@@ -188,37 +183,37 @@ export DATABASE_PATH="/path/to/your/custom/location/code_memory.db"
         code: str,
         language: str,
         description: str,
-        tags_str: str,
+        tags_json: str,
         embedding: NDArray[np.float32],
     ) -> int:
         """Insert snippet and embedding (runs in thread pool)."""
         if self.connection is None:
             raise RuntimeError("Connection not initialized")
-        cursor = self.connection.cursor()
 
-        # Insert snippet metadata
-        cursor.execute(
-            """
-            INSERT INTO code_snippets (code, language, description, tags)
-            VALUES (?, ?, ?, ?)
-        """,
-            (code, language, description, tags_str),
-        )
+        # Use transaction for atomicity - match system design pattern
+        with self.connection:
+            # Insert snippet metadata
+            cursor = self.connection.execute(
+                """
+                INSERT INTO code_snippets (code, language, description, tags)
+                VALUES (?, ?, ?, ?)
+            """,
+                [code, language, description, tags_json],
+            )
 
-        snippet_id = cursor.lastrowid
-        if snippet_id is None:
-            raise RuntimeError("Failed to get snippet ID after insert")
+            snippet_id = cursor.lastrowid
+            if snippet_id is None:
+                raise RuntimeError("Failed to get snippet ID after insert")
 
-        # Insert embedding
-        cursor.execute(
-            """
-            INSERT INTO code_embeddings (snippet_id, embedding)
-            VALUES (?, ?)
-        """,
-            (snippet_id, embedding.tobytes()),
-        )
+            # Insert embedding - match system design pattern with rowid
+            self.connection.execute(
+                """
+                INSERT INTO code_embeddings (rowid, embedding)
+                VALUES (?, ?)
+            """,
+                [snippet_id, embedding.astype(np.float32)],
+            )
 
-        self.connection.commit()
         return snippet_id
 
     async def search_similar(
@@ -262,52 +257,69 @@ export DATABASE_PATH="/path/to/your/custom/location/code_memory.db"
         language: str | None,
     ) -> list[dict[str, Any]]:
         """Synchronous similarity search (runs in thread pool)."""
-        # Build query with optional language filter
-        base_query = """
-            SELECT
-                s.id, s.code, s.language, s.description, s.tags,
-                s.created_at, s.access_count,
-                vec_distance_cosine(e.embedding, ?) as distance
-            FROM code_snippets s
-            JOIN code_embeddings e ON s.id = e.snippet_id
+        # Match system design query pattern
+        query = """
+            SELECT 
+                s.id,
+                s.code,
+                s.language,
+                s.description,
+                s.tags,
+                s.created_at,
+                e.distance
+            FROM code_embeddings e
+            JOIN code_snippets s ON s.id = e.rowid
+            WHERE e.embedding MATCH ?
         """
 
-        params: list[object] = [query_embedding.tobytes()]
+        params = [query_embedding.astype(np.float32)]
 
+        # Add language filter if specified
         if language:
-            base_query += " WHERE s.language = ?"
+            query += " AND s.language = ?"
             params.append(language)
 
-        base_query += """
-            ORDER BY distance ASC
-            LIMIT ?
-        """
+        query += " ORDER BY e.distance LIMIT ?"
         params.append(limit)
 
         if self.connection is None:
             raise RuntimeError("Connection not initialized")
-        cursor = self.connection.cursor()
-        cursor.execute(base_query, params)
+        
+        results_raw = self.connection.execute(query, params).fetchall()
 
+        # Update access statistics - match system design
         results = []
-        for row in cursor.fetchall():
-            # Convert cosine distance to similarity score
-            similarity = 1.0 - row["distance"]
-
+        for row in results_raw:
+            similarity = 1 - row[6]  # Convert distance to similarity
+            
             if similarity >= threshold:
+                # Update access count
+                self.connection.execute(
+                    """
+                    UPDATE code_snippets 
+                    SET accessed_at = CURRENT_TIMESTAMP,
+                        access_count = access_count + 1
+                    WHERE id = ?
+                """,
+                    [row[0]],
+                )
+                
+                # Parse JSON tags
+                tags = json.loads(row[4]) if row[4] else []
+                
                 results.append(
                     {
-                        "id": row["id"],
-                        "code": row["code"],
-                        "language": row["language"],
-                        "description": row["description"],
-                        "tags": row["tags"].split(",") if row["tags"] else [],
+                        "id": row[0],
+                        "code": row[1],
+                        "language": row[2],
+                        "description": row[3],
+                        "tags": tags,
+                        "created_at": row[5],
                         "similarity": float(similarity),
-                        "created_at": row["created_at"],
-                        "access_count": row["access_count"],
                     }
                 )
 
+        self.connection.commit()
         return results
 
     async def get_snippet(self, snippet_id: int) -> dict[str, Any] | None:

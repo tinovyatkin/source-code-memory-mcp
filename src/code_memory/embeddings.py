@@ -6,7 +6,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import Any
+from typing import Any, List
 
 import numpy as np
 import torch
@@ -60,79 +60,34 @@ class EmbeddingStats:
 class CodeEmbedder:
     """Generate embeddings for code snippets using Jina embeddings model."""
 
-    def __init__(
-        self,
-        model_name: str = "jinaai/jina-embeddings-v2-base-code",
-        device: str | None = None,
-        max_workers: int = 4,
-        cache_size: int = 512,
-        memory_cleanup_threshold: int = 1000,
-    ) -> None:
+    def __init__(self, model_name: str = "jinaai/jina-embeddings-v2-base-code") -> None:
         """Initialize the code embedder.
 
         Args:
             model_name: HuggingFace model name for embeddings
-            device: Device to use ('cpu', 'cuda', or None for auto-detect)
-            max_workers: Number of threads for async operations
-            cache_size: Size of LRU cache for embeddings
-            memory_cleanup_threshold: Number of embeddings after which to cleanup
         """
         self.model_name = model_name
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model: SentenceTransformer | None = None
-        self.embedding_dim: int = 768  # Default for Jina base model
         self.max_seq_length: int = 8192
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
-        self.cache_size = cache_size
-        self.memory_cleanup_threshold = memory_cleanup_threshold
-        self.stats = EmbeddingStats()
-        self._embeddings_since_cleanup = 0
+        self.executor = ThreadPoolExecutor(max_workers=1)
 
-        # Create LRU cache for embeddings
-        self._cached_encode = lru_cache(maxsize=cache_size)(self._encode_with_cache_key)
-
-        logger.info(
-            f"CodeEmbedder initialized with model: {model_name}, device: {self.device}, "
-            f"cache_size: {cache_size}"
-        )
+        logger.info(f"CodeEmbedder initialized with model: {model_name}, device: {self.device}")
 
     async def initialize(self) -> None:
-        """Initialize the embedding model asynchronously."""
-        if self.model is not None:
-            logger.warning("Model already initialized")
-            return
-
-        logger.info(f"Loading embedding model: {self.model_name}")
-
-        # Load model in thread pool to avoid blocking
+        """Async initialization of model"""
         loop = asyncio.get_event_loop()
-        self.model = await loop.run_in_executor(self.executor, self._load_model)
-        if self.model is None:
-            raise RuntimeError("Failed to load model")
+        await loop.run_in_executor(self.executor, self._load_model)
 
-        embedding_dim = self.model.get_sentence_embedding_dimension()
-        if embedding_dim is None:
-            raise RuntimeError("Failed to get embedding dimension")
-        self.embedding_dim = embedding_dim
-        logger.info(
-            f"Model loaded successfully. Embedding dimension: {self.embedding_dim}"
-        )
-
-    def _load_model(self) -> SentenceTransformer:
-        """Load the sentence transformer model (runs in thread pool)."""
-        model = SentenceTransformer(
-            self.model_name, device=self.device, trust_remote_code=True
-        )
-
-        # Configure model settings
-        if hasattr(model, "max_seq_length"):
-            model.max_seq_length = self.max_seq_length
-
-        # Enable FP16 for GPU inference
-        if self.device == "cuda" and torch.cuda.is_available():
-            model.half()
-
-        return model
+    def _load_model(self) -> None:
+        """Load model with optimizations"""
+        # Use sentence-transformers for easier handling
+        self.model = SentenceTransformer(self.model_name, trust_remote_code=True)
+        self.model.max_seq_length = 8192
+        
+        # Optimize for inference
+        if self.device == "cuda":
+            self.model = self.model.half()  # Use FP16 for memory efficiency
 
     def _encode_with_cache_key(
         self, text: str, normalize: bool = True
@@ -175,79 +130,26 @@ class CodeEmbedder:
             self._embeddings_since_cleanup = 0
             logger.debug("Performed memory cleanup")
 
-    async def encode_async(
-        self,
-        texts: str | list[str],
-        batch_size: int = 32,
-        normalize_embeddings: bool = True,
-        use_cache: bool = True,
-        max_chunk_size: int = 1000,
-    ) -> NDArray[np.float32]:
-        """Generate embeddings for text(s) asynchronously with optimizations.
-
-        Args:
-            texts: Single text or list of texts to embed
-            batch_size: Batch size for processing
-            normalize_embeddings: Whether to normalize embeddings
-            use_cache: Whether to use LRU cache for single texts
-            max_chunk_size: Maximum chunk size for large batches
-
-        Returns:
-            Numpy array of embeddings with shape (n_texts, embedding_dim)
-        """
-        if self.model is None:
-            raise RuntimeError("Model not initialized. Call initialize() first.")
-
-        if isinstance(texts, str):
-            texts = [texts]
-
-        logger.debug(f"Generating embeddings for {len(texts)} texts")
-
-        # For single text with caching enabled
-        if len(texts) == 1 and use_cache:
-            try:
-                # Check cache first
-                cached_result = self._cached_encode(texts[0], normalize_embeddings)
-                self.stats.record_cache_hit()
-                return np.array([cached_result])
-            except Exception:
-                # Fall through to regular processing
-                pass
-
-        # For large batches, use chunking
-        if len(texts) > max_chunk_size:
-            return await self._encode_chunked(
-                texts, batch_size, normalize_embeddings, max_chunk_size
-            )
-
-        # Regular batch processing
-        start_time = time.time()
+    async def encode_async(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
+        """Async batch encoding with optimal performance"""
         loop = asyncio.get_event_loop()
-        if self.model is None:
-            raise RuntimeError("Model not initialized")
-
-        def _encode_batch() -> Any:
-            if self.model is None:
-                raise RuntimeError("Model not initialized")
-            return self.model.encode(
+        
+        embeddings = await loop.run_in_executor(
+            self.executor,
+            lambda: self.model.encode(
                 texts,
                 batch_size=batch_size,
-                normalize_embeddings=normalize_embeddings,
-                convert_to_numpy=True,
                 show_progress_bar=False,
+                convert_to_tensor=False,
+                normalize_embeddings=True  # L2 normalization for cosine similarity
             )
-
-        embeddings = await loop.run_in_executor(self.executor, _encode_batch)
-
-        time_taken = time.time() - start_time
-        self.stats.record_embedding(len(texts), time_taken)
-        self._embeddings_since_cleanup += len(texts)
-
-        # Periodic memory cleanup
-        self._periodic_memory_cleanup()
-
-        result: NDArray[np.float32] = embeddings.astype(np.float32)
-        return result
+        )
+        
+        return embeddings
+    
+    def get_embedding_dim(self) -> int:
+        """Get embedding dimensions"""
+        return self.model.get_sentence_embedding_dimension()
 
     async def _encode_chunked(
         self,
@@ -335,13 +237,6 @@ class CodeEmbedder:
 
     async def cleanup(self) -> None:
         """Clean up resources."""
-        # Log final performance statistics
-        stats = self.get_performance_stats()
-        logger.info(f"CodeEmbedder performance stats: {stats}")
-
-        # Clear cache
-        self.clear_cache()
-
         if self.model is not None:
             # Move model to CPU and clear cache
             if hasattr(self.model, "to"):
