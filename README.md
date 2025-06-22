@@ -1,8 +1,12 @@
 # 🧠 MCP Code Memory Server
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![CI](https://github.com/tinovyatkin/source-code-memory-mcp/workflows/CI/badge.svg)](https://github.com/tinovyatkin/source-code-memory-mcp/actions/workflows/ci.yml)
+[![Security](https://github.com/tinovyatkin/source-code-memory-mcp/workflows/Security/badge.svg)](https://github.com/tinovyatkin/source-code-memory-mcp/actions/workflows/security.yml)
+[![codecov](https://codecov.io/gh/tinovyatkin/source-code-memory-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/tinovyatkin/source-code-memory-mcp)
 [![MCP SDK](https://img.shields.io/badge/MCP-SDK-green.svg)](https://github.com/modelcontextprotocol/python-sdk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Code style: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 
 A lightweight MCP (Model Context Protocol) server that provides persistent memory for AI coding assistants. Store and retrieve code snippets using natural language queries across sessions.
@@ -188,47 +192,83 @@ graph TD
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/mcp-code-memory
-cd mcp-code-memory
+git clone https://github.com/tinovyatkin/source-code-memory-mcp
+cd source-code-memory-mcp
 
-# Create virtual environment
+# Install UV (recommended) or use pip
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install in development mode with UV
+uv sync --dev
+
+# Or with pip
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install in development mode
 pip install -e ".[dev]"
 
-# Run tests
-pytest
+# Setup pre-commit hooks (optional but recommended)
+uv run pre-commit install
 ```
 
 ### Running Tests
 
 ```bash
-# Run all tests
-pytest
+# Run all tests with UV
+uv run pytest
 
 # Run with coverage
-pytest --cov=code_memory --cov-report=html
+uv run pytest --cov=code_memory --cov-report=html
 
 # Run specific test
-pytest tests/test_embeddings.py::test_code_similarity
+uv run pytest tests/test_embeddings.py::test_code_similarity
+
+# Or with pip/venv
+pytest
+pytest --cov=code_memory --cov-report=html
 ```
 
-### Code Style
+### Code Quality
 
-We use `black` for code formatting and `ruff` for linting:
+We use `ruff` for formatting and linting, `mypy` for type checking:
 
 ```bash
-# Format code
-black src/ tests/
+# Format and lint code
+uv run ruff check . --fix
+uv run ruff format .
 
-# Run linter
-ruff check src/ tests/
+# Type checking  
+uv run mypy src/ --strict
 
-# Type checking
-mypy src/
+# Run all quality checks
+uv run pre-commit run --all-files
 ```
+
+### CI/CD Pipeline
+
+Our GitHub Actions workflows automatically:
+
+- **CI Pipeline** (`ci.yml`): Runs on Python 3.11, 3.12, 3.13
+  - Install dependencies with UV and caching
+  - Run ruff linting and formatting checks
+  - Run mypy type checking
+  - Run pytest with coverage reporting
+  - Upload coverage to Codecov
+
+- **Security Pipeline** (`security.yml`):
+  - Run safety checks for known vulnerabilities
+  - Run bandit security linter
+  - Weekly scheduled runs
+
+- **Integration Tests** (`integration.yml`):
+  - Test on Ubuntu, macOS, Windows
+  - Test package installation and basic functionality
+  - Daily scheduled runs
+
+- **Release Pipeline** (`release.yml`):
+  - Build and publish to PyPI on release
+  - Trusted publishing with OIDC
+
+- **Dependabot**: Automated dependency updates for Python packages and GitHub Actions
 
 ## 📊 Performance
 
