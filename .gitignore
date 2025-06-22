@@ -192,3 +192,23 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Project specific
+*.db
+*.sqlite
+*.sqlite3
+.env.local
+.env.production
+
+# AI/MCP Data Directory - Application data only
+.ai/*.db
+.ai/*.sqlite
+.ai/*.sqlite3
+.ai/cache/
+
+# MCP Server
+server.log
+debug.log
+
+# FastMCP
+fastmcp.log
