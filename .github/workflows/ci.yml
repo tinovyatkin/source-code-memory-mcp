@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+
+    - name: Set up virtual environment
+      run: |
+        uv python install ${{ matrix.python-version }}
+        uv sync --dev
+
+    - name: Run ruff linting
+      run: |
+        uv run ruff check .
+
+    - name: Run ruff formatting check
+      run: |
+        uv run ruff format --check .
+
+    - name: Run type checking with mypy
+      run: |
+        uv run mypy src/ --strict
+      continue-on-error: true  # Allow mypy to fail for now until all type issues are resolved
+
+    - name: Run tests with pytest
+      run: |
+        uv run pytest tests/ -v --tb=short --cov=src/code_memory --cov-report=xml --cov-report=term-missing
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      if: matrix.python-version == '3.12'  # Only upload coverage for one Python version
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false

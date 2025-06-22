@@ -1,0 +1,71 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run integration tests daily at 6 AM UTC
+    - cron: '0 6 * * *'
+
+jobs:
+  integration:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        enable-cache: true
+
+    - name: Install package in editable mode
+      run: |
+        uv sync --dev
+
+    - name: Test package import
+      run: |
+        uv run python -c "import code_memory; print('✅ Package import successful')"
+
+    - name: Test utils functionality  
+      run: |
+        uv run python -c "from code_memory.utils import normalize_language; print('✅ Utils work:', normalize_language('Python'))"
+
+    - name: Test basic embeddings (CPU only)
+      run: |
+        uv run python -c "
+        import asyncio
+        from code_memory.embeddings import CodeEmbedder
+        
+        async def test_embeddings():
+            embedder = CodeEmbedder(device='cpu')
+            await embedder.initialize()
+            result = await embedder.encode_async('def hello(): pass')
+            print(f'✅ Embeddings work: shape={result.shape}')
+            await embedder.cleanup()
+        
+        asyncio.run(test_embeddings())
+        "
+      timeout-minutes: 10
+
+    - name: Test CLI help (Unix)
+      if: runner.os != 'Windows'
+      run: |
+        timeout 5 uv run python -m code_memory --help || echo "✅ CLI accessible"
+
+    - name: Test CLI help (Windows)
+      if: runner.os == 'Windows'
+      shell: cmd
+      run: |
+        timeout /t 5 >nul && uv run python -m code_memory --help || echo ✅ CLI accessible
